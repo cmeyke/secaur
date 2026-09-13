@@ -1,6 +1,7 @@
 # aur-diff.sh
 
-Check for pending AUR updates — and save their diffs for review.
+Check for pending AUR updates — and save their diffs for review, by humans
+or by an LLM.
 
 `aur-diff.sh` reports which installed foreign (AUR) packages have updates
 pending and writes a unified diff of the build files (`PKGBUILD` and
@@ -8,6 +9,16 @@ pending and writes a unified diff of the build files (`PKGBUILD` and
 The output file is always overwritten, so it always reflects the most recent
 check — ideal for reviewing what an AUR upgrade would *actually change*
 before you run it.
+
+`aur.diff` is also a ready-made corpus for a model-assisted security audit:
+the bundled [`aur-security-audit`](skills/aur-security-audit/SKILL.md) agent
+skill teaches an LLM the complete workflow — regenerate the corpus, audit
+every pending update against its red-flag catalog, verify findings against
+the AUR and upstream, and deliver a per-package SAFE / REVIEW / BLOCK
+verdict report. Copy `skills/aur-security-audit/` into your agent's skill
+directory (e.g. `~/.claude/skills/` or `~/.agents/skills/`), then simply ask
+your model to *audit the pending AUR updates* — see
+[Agent skill](#agent-skill) below.
 
 ## Usage
 
