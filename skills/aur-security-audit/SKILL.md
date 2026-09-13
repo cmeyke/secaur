@@ -31,10 +31,19 @@ Always generate the corpus yourself; never audit an `aur.diff` whose header
 ./aur-diff.sh        # or: bash /path/to/secaur/aur-diff.sh
 ```
 
-- Exit `0` — no pending updates: report "nothing to audit" and stop.
-- Exit `3` — updates pending: `./aur.diff` was just (over)written; audit it.
+- Exit `0` — nothing to audit: no pending updates at all, or every pending
+  update is held back via `IgnorePkg` (the header lists them). Report the
+  held-back list as intentionally not updated and stop.
+- Exit `3` — auditable updates pending: `./aur.diff` was just (over)written;
+  audit it.
 - Exit `1` — the tool failed; `aur.diff` then contains an `# ERROR` note.
   Do not audit stale data — rerun or fix first.
+
+Held-back updates: packages in an `IgnorePkg` list (pacman.conf / paru.conf /
+yay config) are intentionally not updated — their "pending" status never
+resolves, so `aur-diff.sh` does not audit them by default. Run with
+`--include-ignored` only when the user explicitly asks to audit held-back
+updates too; such sections are marked `[held back: IgnorePkg]`.
 
 Fallback without `aur-diff.sh` (reproduce its core):
 1. Pending list: `pacman -Qm`; query the AUR in chunks of ~50 with
@@ -49,8 +58,12 @@ Fallback without `aur-diff.sh` (reproduce its core):
 
 `aur.diff` layout:
 
-- Header: counts (`N checked, M found in the AUR, K local-only`) and
-  `# Overview` — one `name  old -> new` line per pending package.
+- Header: counts (`N checked, M found in the AUR, K local-only`), the
+  pending/actionable/held-back split, `# Overview` — one
+  `name  old -> new` line per audited package — and, when updates are held
+  back via `IgnorePkg`, a `# held back via IgnorePkg — … NOT audited` list
+  (carry it into the report verbatim; those updates are intentionally not
+  applied, no verdict needed).
 - One section per pending AUR base:
   - `# <base> — AUR base with N pending package(s):` — split packages are
     grouped; audit once, one verdict covers all listed packages.
@@ -148,6 +161,7 @@ Report shape:
 - Checks: version ✓  sources ✓  checksums ✓  depends ✓  logic ✓  upstream ✓  AUR ✓
 - Verdict: SAFE | REVIEW | BLOCK — recommended action
 
+## Held-back (ignored) updates
 ## Local-only packages
 ## Recommendation
 ```
@@ -155,7 +169,8 @@ Report shape:
 ## Validation before delivering
 
 - Every package in `# Overview` appears in the report; counts match the
-  header.
+  header, and held-back (IgnorePkg) updates are listed as held-back, not
+  silently dropped.
 - Every verdict cites findings; every finding cites evidence.
 - Changed stat-only files were fetched and audited.
 - Nothing was built, executed, or installed; the upgrade decision is the

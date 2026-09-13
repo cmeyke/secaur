@@ -12,20 +12,21 @@ before you run it.
 ## Usage
 
 ```sh
-./aur-diff.sh [-o OUTPUT]
+./aur-diff.sh [OPTIONS]
 ```
 
-| Option                | Description                                   |
-|-----------------------|-----------------------------------------------|
-| `-o, --output FILE`   | Write the diffs to `FILE` (default: `./aur.diff`) |
-| `-h, --help`          | Show help and exit                            |
+| Option                   | Description                                        |
+|--------------------------|----------------------------------------------------|
+| `-o, --output FILE`      | Write the diffs to `FILE` (default: `./aur.diff`)  |
+| `--include-ignored`      | Also audit updates held back via `IgnorePkg`       |
+| `-h, --help`             | Show help and exit                                 |
 
 ### Exit status
 
 | Code | Meaning                                                            |
 |------|--------------------------------------------------------------------|
-| `0`  | No AUR updates are pending (the output file contains a note)        |
-| `3`  | AUR updates are pending; their diffs were written                  |
+| `0`  | No actionable AUR updates are pending (none at all, or all held back via `IgnorePkg`) |
+| `3`  | Auditable AUR updates are pending; their diffs were written        |
 | `1`  | Error — output may be incomplete; see stderr and notes in the file |
 | `2`  | Usage error                                                         |
 
@@ -35,7 +36,7 @@ from cron or other scripts:
 ```sh
 ./aur-diff.sh || rc=$?
 case ${rc:-0} in
-    0) echo "AUR is up to date." ;;
+    0) echo "AUR is up to date (or every pending update is held back)." ;;
     3) echo "AUR updates pending — review aur.diff." ;;
     *) echo "aur-diff.sh failed ($rc)." ;;
 esac
@@ -59,25 +60,39 @@ esac
    packages whose `pkgver` comes from a `pkgver()` function, or versions
    older than the last 200 build-file commits), the complete current
    `PKGBUILD` is written instead, with an explanatory note.
+6. Updates held back via `IgnorePkg` (from `pacman.conf` — read with
+   `pacman-conf` when available so `Include=` files are resolved —,
+   `paru.conf`, or yay's `config.json`; glob patterns supported) would be
+   "pending" forever: they are summarized in the header but not audited, and
+   exit `0` is returned when they are the only pending updates.
+   `--include-ignored` audits them anyway, marking their sections.
 
 The result is a review document: everything you are about to accept when you
 build the update.
 
 ## Example output
 
-Trimmed from a real run:
+Trimmed from a real run — the eight pending updates below are held back via
+`IgnorePkg`, so they are summarized instead of re-audited on every run:
 
 ```
 # aur.diff — diffs of pending AUR package updates
-# generated 2026-09-13 06:47 UTC by aur-diff.sh
-# foreign packages: 64 checked, 62 found in the AUR, 2 local-only (skipped)
-# pending AUR updates: 8
-
-# Overview:
+# generated 2026-09-13 08:26 UTC by aur-diff.sh
+# foreign packages: 63 checked, 62 found in the AUR, 1 local-only (skipped)
+# pending AUR updates: 8 (0 actionable, 8 held back via IgnorePkg)
+# held back via IgnorePkg — intentionally not updated, NOT audited
+# (rerun with --include-ignored to audit them anyway):
 #   ttf-ms-win11                             10.0.26200.7462-1 -> 10.0.26200.9168-3
 #   ttf-ms-win11-japanese                    10.0.26200.7462-1 -> 10.0.26200.9168-3
 #   ...
 
+# No actionable AUR updates — nothing to review.
+```
+
+When updates are audited (actionable, or with `--include-ignored`), one
+section per AUR base follows:
+
+```
 # ------------------------------------------------------------------------
 # ttf-ms-win11 — AUR base with 8 pending package(s):
 #   ttf-ms-win11          10.0.26200.7462-1 -> 10.0.26200.9168-3
@@ -115,6 +130,11 @@ diff --git a/PKGBUILD b/PKGBUILD
 - **Devel packages.** Like any version-based checker, `-git`/`-hg`-style
   packages with a `pkgver()` function can appear perpetually pending; their
   sections then contain the full current `PKGBUILD` for a full review.
+- **Ignore-aware.** Updates held back via `IgnorePkg` (`/etc/pacman.conf`,
+  `paru.conf`, or yay's `config.json`; glob patterns supported; `pacman-conf`
+  resolves `Include=` files) are summarized in the header but not audited —
+  they would be "pending" forever otherwise. `--include-ignored` audits them
+  anyway and marks their sections as held back.
 - **Epochs and split packages** are handled: `epoch:pkgver-pkgrel` versions
   match their commits, and split packages share one section per AUR base.
 - **JSON parsing** uses `jq` or `python3` (an `awk` fallback exists). Force a

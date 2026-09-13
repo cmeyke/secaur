@@ -8,14 +8,16 @@
 # overwritten, so it always reflects the most recent check.
 #
 # Usage:
-#   ./aur-diff.sh [-o OUTPUT]
+#   ./aur-diff.sh [OPTIONS]
 #
-#   -o, --output FILE   write the diffs to FILE (default: ./aur.diff)
-#   -h, --help          show this help and exit
+#   -o, --output FILE      write the diffs to FILE (default: ./aur.diff)
+#       --include-ignored  also audit updates held back via IgnorePkg
+#   -h, --help             show this help and exit
 #
 # Exit status:
-#   0   done — no AUR updates are pending (output file contains a note)
-#   3   done — AUR updates are pending, their diffs were written
+#   0   done — no actionable AUR updates are pending (none at all, or all
+#       held back via IgnorePkg; the output file contains a note)
+#   3   done — auditable AUR updates are pending, their diffs were written
 #   1   error — output may be incomplete; see stderr and notes in the file
 #
 # How it works:
@@ -34,13 +36,22 @@
 #      -git packages whose pkgver comes from a pkgver() function, or when the
 #      installed version is older than the last SCAN_LIMIT build commits), the
 #      complete current PKGBUILD is written instead, with an explanatory note.
+#   6. Updates held back via IgnorePkg (pacman.conf — preferably read with
+#      pacman-conf —, paru.conf, or yay's config.json; glob patterns are
+#      supported) would be "pending" forever. They are summarized in the
+#      output header but not audited; if they are the only pending updates,
+#      exit 0 is returned. Use --include-ignored to audit them anyway (their
+#      sections are marked as held back).
 #
 # Requirements: bash, pacman (provides vercmp), curl, diff, plus jq or
 #   python3 for JSON parsing (an awk fallback exists). git is required for
-#   real diffs; without it only full PKGBUILDs can be saved. The AUR is only
-#   read — nothing is installed, built or modified on this system.
+#   real diffs; without it only full PKGBUILDs can be saved. pacman-conf is
+#   used when available to resolve IgnorePkg including Include= files.
+#   The AUR is only read — nothing is installed, built or modified.
 #
-# The JSON parser can be forced with AUR_DIFF_PARSER=auto|jq|python3|awk.
+# The JSON parser can be forced with AUR_DIFF_PARSER=auto|jq|python3|awk;
+# AUR_DIFF_IGNORE_CONF overrides the ignore-list config files (a
+# colon-separated list).
 
 set -euo pipefail
 
@@ -56,6 +67,8 @@ readonly CURL_OPTS=(--silent --show-error --fail --location
 OUT='aur.diff'
 tmp=''
 JSON_PARSER="${AUR_DIFF_PARSER:-auto}"
+INCLUDE_IGNORED=0
+declare -A IGNORE_SEEN=()   # IgnorePkg entries: exact names or glob patterns
 
 # ----------------------------------------------------------------- helpers ---
 
@@ -63,12 +76,14 @@ usage() {
     cat <<EOF
 aur-diff.sh — check for pending AUR updates; save their diffs to a file
 
-Usage: $PROGNAME [-o OUTPUT]
+Usage: $PROGNAME [OPTIONS]
 
-  -o, --output FILE   write the diffs to FILE (default: ./aur.diff)
-  -h, --help          show this help and exit
+  -o, --output FILE      write the diffs to FILE (default: ./aur.diff)
+      --include-ignored  also audit updates held back via IgnorePkg
+  -h, --help             show this help and exit
 
-Exit status:  0 no pending AUR updates   3 pending updates (diffs written)
+Exit status:  0 no actionable pending AUR updates (none, or all ignored)
+              3 auditable pending updates (diffs written)
               1 error — output may be incomplete (see notes in the file)
 EOF
 }
@@ -116,6 +131,118 @@ choose_parser() {
             fi ;;
         *) die 'AUR_DIFF_PARSER must be one of: auto, jq, python3, awk' ;;
     esac
+}
+
+# ------------------------------------------------------------ ignore lists ---
+# Updates for packages in an IgnorePkg list are intentionally not applied
+# (paru prints "ignoring package upgrade" for them), so their "pending"
+# status never resolves — they would be re-audited on every run. aur-diff.sh
+# therefore does not audit them by default and only summarizes them in the
+# output header. Sources: pacman-conf(1) (preferred: it resolves Include=
+# directives), the ini-style pacman.conf/paru.conf files themselves, and
+# yay's config.json. Glob patterns are supported.
+
+add_ignore_patterns() { # words as arguments: exact names or glob patterns
+    local p
+    for p in "$@"; do
+        [[ -n $p ]] || continue
+        IGNORE_SEEN[$p]=1
+    done
+}
+
+read_ini_ignores() { # $1 = ini-style config file, $2 = include depth
+    local file=$1 depth=${2:-0} line key rest inc f
+    local -a pats=()
+    if [[ ! -r $file ]] || ((depth > 4)); then
+        return 0
+    fi
+    while IFS= read -r line || [[ -n $line ]]; do
+        line=${line%%#*}
+        [[ $line == *=* ]] || continue
+        key=${line%%=*}
+        key=${key#"${key%%[![:space:]]*}"}   # trim whitespace around the key
+        key=${key%"${key##*[![:space:]]}"}
+        rest=${line#*=}
+        case ${key,,} in
+            ignorepkg)
+                pats=()
+                read -r -a pats <<<"$rest" || true   # no globbing here
+                add_ignore_patterns "${pats[@]}"
+                ;;
+            include)
+                for inc in $rest; do                 # globbing intended here
+                    for f in $inc; do
+                        [[ -f $f ]] || continue
+                        read_ini_ignores "$f" $((depth + 1))
+                    done
+                done
+                ;;
+        esac
+    done <"$file"
+}
+
+read_yay_ignores() { # $1 = yay config.json
+    local file=$1 out line
+    local -a pats=()
+    if [[ ! -r $file ]]; then
+        return 0
+    fi
+    if have jq; then
+        out=$(jq -r '.ignorepkg[]?' "$file" 2>/dev/null) || out=''
+    elif have python3; then
+        out=$(python3 -c '
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+for p in cfg.get("ignorepkg") or []:
+    print(p)
+' "$file" 2>/dev/null) || out=''
+    else
+        return 0
+    fi
+    while IFS= read -r line; do
+        pats=()
+        read -r -a pats <<<"$line" || true
+        add_ignore_patterns "${pats[@]}"
+    done <<<"$out"
+}
+
+load_ignore_lists() {
+    local -a confs=()
+    local c out line
+    local -a pats=()
+    if [[ -n ${AUR_DIFF_IGNORE_CONF:-} ]]; then
+        IFS=: read -r -a confs <<<"$AUR_DIFF_IGNORE_CONF"
+    else
+        confs=('/etc/pacman.conf' '/etc/paru.conf'
+               "${XDG_CONFIG_HOME:-$HOME/.config}/paru/paru.conf"
+               "$HOME/.config/yay/config.json")
+    fi
+    for c in "${confs[@]}"; do
+        [[ -n $c ]] || continue
+        if [[ $c == *.json ]]; then
+            read_yay_ignores "$c"
+        elif [[ $c == '/etc/pacman.conf' ]] && have pacman-conf; then
+            # pacman-conf resolves Include= directives and format quirks
+            out=$(pacman-conf IgnorePkg 2>/dev/null) || out=''
+            while IFS= read -r line; do
+                pats=()
+                read -r -a pats <<<"$line" || true
+                add_ignore_patterns "${pats[@]}"
+            done <<<"$out"
+        else
+            read_ini_ignores "$c" 0
+        fi
+    done
+}
+
+is_ignored() { # $1 = package name; rc 0 when held back via IgnorePkg
+    local name=$1 p
+    for p in "${!IGNORE_SEEN[@]}"; do
+        if [[ $name == $p ]]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 # ------------------------------------------------------- AUR RPC (version db) --
@@ -284,27 +411,37 @@ emit_full_pkgbuild_via_cgit() {
 }
 
 # One AUR base's review section, covering every pending split package of it.
-# $1 = pkgbase, $2 = group: "name<TAB>installed<TAB>remote" lines.
+# $1 = pkgbase, $2 = group lines: "name<TAB>installed<TAB>remote<TAB>held"
+# where <held> is "held" for packages held back via IgnorePkg, else empty.
 # rc != 0 on hard failure.
 emit_base_section() {
     local pbase=$1 group=$2
     local repo="$tmp/repos/$pbase"
-    local n iv rv n0 iv0 rv0 count baseline anchor='' sha1 sha2
+    local n iv rv ig n0 iv0 rv0 ig0 count baseline anchor='' sha1 sha2
+    local held held0=''
     local -A tried=()
     local -a tryvers=()
 
-    IFS=$'\t' read -r n0 iv0 rv0 <<<"$group"
+    IFS=$'\t' read -r n0 iv0 rv0 ig0 <<<"$group"
+    if [[ ${ig0:-} == 'held' ]]; then
+        held0='   [held back: IgnorePkg]'
+    fi
     count=$(grep -c . <<<"$group")
 
     printf '\n'
     printf '# ------------------------------------------------------------------------\n'
     if ((count == 1)) && [[ $n0 == "$pbase" ]]; then
-        printf '# %s : %s  ->  %s\n' "$n0" "$iv0" "$rv0"
+        printf '# %s : %s  ->  %s%s\n' "$n0" "$iv0" "$rv0" "$held0"
     else
         printf '# %s — AUR base with %d pending package(s):\n' "$pbase" "$count"
-        while IFS=$'\t' read -r n iv rv; do
+        while IFS=$'\t' read -r n iv rv ig; do
             [[ -n ${n:-} ]] || continue
-            printf '#   %-38s %s -> %s\n' "$n" "$iv" "$rv"
+            if [[ ${ig:-} == 'held' ]]; then
+                held='   [held back]'
+            else
+                held=''
+            fi
+            printf '#   %-38s %s -> %s%s\n' "$n" "$iv" "$rv" "$held"
         done <<<"$group"
     fi
     printf '# ------------------------------------------------------------------------\n'
@@ -325,7 +462,7 @@ emit_base_section() {
     fi
 
     # distinct installed versions of the group (split packages are usually equal)
-    while IFS=$'\t' read -r n iv rv; do
+    while IFS=$'\t' read -r n iv rv ig; do
         [[ -n ${n:-} ]] || continue
         if [[ -z ${tried[$iv]:-} ]]; then
             tried[$iv]=1
@@ -386,6 +523,9 @@ main() {
             --output=*)
                 OUT=${1#*=}
                 shift ;;
+            --include-ignored)
+                INCLUDE_IGNORED=1
+                shift ;;
             -h|--help)
                 usage
                 exit 0 ;;
@@ -403,6 +543,7 @@ main() {
 
     check_deps
     choose_parser
+    load_ignore_lists
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/aur-diff.XXXXXX") || die 'mktemp failed'
     body="$tmp/body"
     : >"$body"
@@ -436,9 +577,25 @@ main() {
         fi
     done
 
+    # split pending updates into actionable ones and held-back (IgnorePkg) ones
+    local -a actionable=() heldback=() audit=()
+    for n in "${pending[@]}"; do
+        if is_ignored "$n"; then
+            heldback+=("$n")
+        else
+            actionable+=("$n")
+        fi
+    done
+    if ((INCLUDE_IGNORED)); then
+        audit=("${pending[@]}")
+    else
+        audit=("${actionable[@]}")
+    fi
+
     if ((${#pending[@]} > 0)); then
-        printf '  %d pending AUR update(s):\n' "${#pending[@]}"
-        for n in "${pending[@]}"; do
+        printf '  %d pending AUR update(s) — %d actionable, %d held back via IgnorePkg\n' \
+            "${#pending[@]}" "${#actionable[@]}" "${#heldback[@]}"
+        for n in "${audit[@]}"; do
             printf '    %s %s -> %s\n' "$n" "${installed[$n]}" "${remote[$n]}"
         done
     fi
@@ -452,22 +609,39 @@ main() {
         if ((${#local_only[@]} > 0)); then
             printf '# local-only (not in the AUR): %s\n' "${local_only[*]}"
         fi
-        printf '# pending AUR updates: %d\n' "${#pending[@]}"
-        if ((${#pending[@]} == 0)); then
-            printf '\n# No pending AUR updates — nothing to review.\n'
+        printf '# pending AUR updates: %d (%d actionable, %d held back via IgnorePkg)\n' \
+            "${#pending[@]}" "${#actionable[@]}" "${#heldback[@]}"
+        if ((${#heldback[@]} > 0)); then
+            if ((INCLUDE_IGNORED)); then
+                printf '# held-back (IgnorePkg) updates are INCLUDED in this audit (--include-ignored)\n'
+            else
+                printf '# held back via IgnorePkg — intentionally not updated, NOT audited\n'
+                printf '# (rerun with --include-ignored to audit them anyway):\n'
+                for n in "${heldback[@]}"; do
+                    printf '#   %-38s %s -> %s\n' "$n" "${installed[$n]}" "${remote[$n]}"
+                done
+            fi
+        fi
+        if ((${#audit[@]} == 0)); then
+            printf '\n# No actionable AUR updates — nothing to review.\n'
         else
             printf '\n# Overview:\n'
-            for n in "${pending[@]}"; do
-                printf '#   %-40s %s -> %s\n' "$n" "${installed[$n]}" "${remote[$n]}"
+            for n in "${audit[@]}"; do
+                if is_ignored "$n"; then
+                    printf '#   %-40s %s -> %s   [held back]\n' \
+                        "$n" "${installed[$n]}" "${remote[$n]}"
+                else
+                    printf '#   %-40s %s -> %s\n' "$n" "${installed[$n]}" "${remote[$n]}"
+                fi
             done
         fi
     } >>"$body"
 
-    # group the pending packages by AUR base (split packages share one build)
-    local b groups_count=0
+    # group the audited packages by AUR base (split packages share one build)
+    local b groups_count=0 igflag
     local -A seen_base=() base_groups=()
     local -a bases=()
-    for n in "${pending[@]}"; do
+    for n in "${audit[@]}"; do
         b=${base[$n]}
         if [[ -z ${seen_base[$b]:-} ]]; then
             seen_base[$b]=1
@@ -476,7 +650,12 @@ main() {
         if [[ -n ${base_groups[$b]:-} ]]; then
             base_groups[$b]+=$'\n'
         fi
-        base_groups[$b]+="$n"$'\t'"${installed[$n]}"$'\t'"${remote[$n]}"
+        if is_ignored "$n"; then
+            igflag='held'
+        else
+            igflag=''
+        fi
+        base_groups[$b]+="$n"$'\t'"${installed[$n]}"$'\t'"${remote[$n]}"$'\t'"$igflag"
     done
 
     for b in "${bases[@]}"; do
@@ -497,9 +676,13 @@ main() {
         printf '%s: diffs for %d of the pending update(s) could not be produced — %s may be incomplete\n' \
             "$PROGNAME" "$failed" "$OUT" >&2
         exit 1
-    elif ((${#pending[@]} > 0)); then
-        printf '%d pending AUR update(s) — diffs written to %s\n' "${#pending[@]}" "$OUT"
+    elif ((${#audit[@]} > 0)); then
+        printf '%d pending AUR update(s) audited — diffs written to %s\n' "${#audit[@]}" "$OUT"
         exit 3
+    elif ((${#heldback[@]} > 0)); then
+        printf 'No actionable AUR updates — %d update(s) held back via IgnorePkg (noted in %s).\n' \
+            "${#heldback[@]}" "$OUT"
+        exit 0
     else
         printf 'No pending AUR updates — %s (re)written with a note.\n' "$OUT"
         exit 0
