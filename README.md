@@ -134,6 +134,15 @@ Copy the script anywhere on your `PATH`, e.g.:
 install -m 755 aur-diff.sh ~/.local/bin/aur-diff.sh
 ```
 
+## Agent skill
+
+`skills/aur-security-audit/` is a model skill that walks an agent through a
+read-only security audit of all pending AUR updates: it regenerates
+`aur.diff`, audits every section against
+`skills/aur-security-audit/references/red-flags.md`, verifies findings
+against the AUR and upstream, and produces a SAFE/REVIEW/BLOCK verdict
+report per pending package.
+
 ## License
 
 [MIT](LICENSE) © Carsten Meyke
