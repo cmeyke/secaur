@@ -14,6 +14,22 @@ anything during the audit; the report recommends, the human decides. The
 final `sudo`/`paru` step stays with the user — this audit is the preparation
 for it.
 
+## Scope
+
+Determine the scope from the user's request and state it in the report:
+
+- **Generic requests** ("audit my pending updates", "is it safe to
+  upgrade?", "audit before I run paru") cover **both** corpora — run both
+  `aur-diff.sh` and `repo-diff.sh` in Step 1 and audit both.
+- **Explicitly scoped requests** cover exactly what was asked: "audit my
+  pending **AUR** updates" audits only `aur.diff`; "audit the **repo**
+  updates" audits only `repo.diff`. Do not silently widen the scope — but
+  always record the limitation in the report header (e.g. `Scope: AUR only
+  — repository updates were NOT audited`) and offer to extend the audit
+  to the other side.
+
+Never present a one-sided audit as full coverage.
+
 ## Inputs and assumptions
 
 - An Arch(-based) machine with `pacman` (provides `vercmp`), `pacman-conf`,
@@ -200,7 +216,8 @@ Report shape:
 
 ```markdown
 # Pending Updates Security Audit
-<date> · <host> · corpora: aur.diff + repo.diff generated <ts> ·
+<date> · <host> · scope: both corpora | AUR only | repository only ·
+corpora: aur.diff + repo.diff generated <ts> ·
 N pending AUR packages in M bases · K pending repo packages
 
 ## Summary
