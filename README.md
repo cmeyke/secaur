@@ -12,13 +12,22 @@ before you run it.
 
 `aur.diff` is also a ready-made corpus for a model-assisted security audit:
 the bundled [`aur-security-audit`](skills/aur-security-audit/SKILL.md) agent
-skill teaches an LLM the complete workflow — regenerate the corpus, audit
-every pending update against its red-flag catalog, verify findings against
-the AUR and upstream, and deliver a per-package SAFE / REVIEW / BLOCK
-verdict report. Copy `skills/aur-security-audit/` into your agent's skill
-directory (e.g. `~/.claude/skills/` or `~/.agents/skills/`), then simply ask
-your model to *audit the pending AUR updates* — see
-[Agent skill](#agent-skill) below.
+skill teaches an LLM the complete workflow — regenerate both corpora
+(`aur.diff` and `repo.diff`), audit every pending update — AUR and
+repository — against its red-flag catalog, verify findings against the AUR,
+the packaging repositories and upstream, and deliver a per-package
+SAFE / REVIEW / BLOCK verdict report. Copy `skills/aur-security-audit/`
+into your agent's skill directory (e.g. `~/.claude/skills/` or
+`~/.agents/skills/`), then simply ask your model to *audit the pending
+updates* — see [Agent skill](#agent-skill) below.
+
+Its companion `repo-diff.sh` covers the other half of an upgrade — the
+repository (`pacman -Syu`) side. It refreshes the sync databases
+non-privileged (the `checkupdates` technique), lists the pending repo
+updates, and writes a `repo.diff` corpus: per-package metadata diffs
+(dependencies, packager, sizes, `install=` changes) plus upstream PKGBUILD
+diffs from the official Arch packaging repositories. See
+[repo-diff.sh — the repository side](#repo-diffsh--the-repository-side).
 
 ## Usage
 
@@ -150,7 +159,79 @@ diff --git a/PKGBUILD b/PKGBUILD
   match their commits, and split packages share one section per AUR base.
 - **JSON parsing** uses `jq` or `python3` (an `awk` fallback exists). Force a
   specific parser with `AUR_DIFF_PARSER=jq|python3|awk`.
-- `aur.diff` is generated output and therefore listed in `.gitignore`.
+- `aur.diff` and `repo.diff` are generated output and therefore listed in
+  `.gitignore`.
+
+## repo-diff.sh — the repository side
+
+`repo-diff.sh` is the companion for non-AUR updates (`pacman -Syu`, the
+first half of `paru`). Everything runs unprivileged — nothing is installed,
+and the real databases are untouched.
+
+```sh
+./repo-diff.sh [OPTIONS]     # writes ./repo.diff (always overwritten)
+
+  -o, --output FILE      write the diffs to FILE (default: ./repo.diff)
+      --include-ignored  also audit updates held back via IgnorePkg
+```
+
+Same exit codes as `aur-diff.sh`: `0` nothing actionable (all pending updates
+are held back via IgnorePkg counts as nothing actionable), `3` auditable
+updates written, `1` error, `2` usage error.
+
+How it works:
+
+1. Fresh sync databases are fetched into a temporary dbpath with the local
+   database symlinked in (the `checkupdates` technique). Methods are tried
+   in order — `pacman -Sy` under fakeroot (signature-verified, exactly what
+   `checkupdates` does), direct `<repo>.db` downloads from the configured
+   mirrors (works everywhere, audit-only; pacman verifies again at real
+   install time), then the existing sync dbs (staleness is noted in the
+   header). Force one with `REPO_DIFF_SYNC=fakeroot|download|existing|auto`.
+2. `pacman -Qu` against that dbpath lists the pending repo updates. Packages
+   locally newer than the repos (e.g. local rebuilds) are not pending —
+   matching what pacman itself would do.
+3. Per pending package the corpus contains a metadata diff (Depends On,
+   Optional Deps, Provides, Conflicts With, Replaces, Groups, Packager,
+   Architecture, Installed Size — only changed fields), the download size
+   and sha256 from the sync db, the upstream PKGBUILD's `install=` value
+   (old → new), and a unified diff of the upstream PKGBUILD between the old
+   and the new version from
+   `gitlab.archlinux.org/archlinux/packaging/packages`. Epoch prefixes and
+   repo-rebuild pkgrel renumbering (CachyOS's `1.2` or bumped `2`) are
+   normalized to upstream tags — the resolved tags are stated and verified
+   against `.SRCINFO` so a wrong tag is never silently diffed. Split
+   packages share one PKGBUILD diff per pkgbase; packages without an
+   upstream repo (e.g. CachyOS-specific ones) get a note instead.
+4. Updates held back via `IgnorePkg` are summarized but not audited, exactly
+   like in `aur-diff.sh`; `--include-ignored` overrides.
+
+Example section (trimmed from a test run):
+
+```
+# ------------------------------------------------------------------------
+# bash : 5.3.12-1  ->  5.3.15-2   [core]
+# ------------------------------------------------------------------------
+# metadata changes (installed vs pending sync db):
+#   Packager: CachyOS <admin@cachyos.org> -> Tobias Powalowski <tpowa@archlinux.org>
+#   Architecture: x86_64_v4 -> x86_64
+# pending package: download 1955.09 KiB, sha256 fd569fa146a75572f42d8cb328a99220e16c4a0ad9dccbcc9efc0004ab3e244b
+# upstream PKGBUILD (archlinux/packaging/packages/bash):
+# (repo rebuilds normalized to the upstream tags: 5.3.12-1 -> 5.3.15-1)
+# install script (upstream PKGBUILD install=): bash.install -> bash.install
+--- PKGBUILD (5.3.12-1)
++++ PKGBUILD (5.3.15-1)
+@@ -7,7 +7,7 @@
+ _basever=5.3
+-_patchlevel=12
++_patchlevel=15
+ pkgver=${_basever}.${_patchlevel}
+```
+
+Requirements: `pacman`, `pacman-conf`, `curl`, `diff`, `bsdtar` (libarchive).
+Note: since pacman ≥ 6.1 the sync databases no longer contain install
+scriptlets, so "Install Script" cannot be compared from the databases — the
+upstream `install=` line and its diff provide that signal instead.
 
 ## Requirements
 
@@ -159,20 +240,21 @@ diffs; without it only full `PKGBUILD`s are saved), plus `jq` or `python3`.
 
 ## Installation
 
-Copy the script anywhere on your `PATH`, e.g.:
+Copy the scripts anywhere on your `PATH`, e.g.:
 
 ```sh
-install -m 755 aur-diff.sh ~/.local/bin/aur-diff.sh
+install -m 755 aur-diff.sh repo-diff.sh ~/.local/bin/
 ```
 
 ## Agent skill
 
 `skills/aur-security-audit/` is a model skill that walks an agent through a
-read-only security audit of all pending AUR updates: it regenerates
-`aur.diff`, audits every section against
+read-only security audit of all pending updates — AUR and repository: it
+regenerates `aur.diff` (aur-diff.sh) and `repo.diff` (repo-diff.sh), audits
+every section against
 `skills/aur-security-audit/references/red-flags.md`, verifies findings
-against the AUR and upstream, and produces a SAFE/REVIEW/BLOCK verdict
-report per pending package.
+against the AUR, the packaging repositories and upstream, and produces a
+SAFE/REVIEW/BLOCK verdict report per pending package.
 
 ## License
 

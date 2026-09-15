@@ -94,6 +94,28 @@ against the baseline (`git diff <sha1>..HEAD -- <file>`) when changed.
 - AUR comments flagging the current update → investigate before verdict.
 - `LastModified` minutes before the audit with sweeping changes → Medium.
 
+## 8. Repository (non-AUR) updates (repo.diff)
+
+Repo packages are built and signed by repo packagers — a much higher
+baseline trust than AUR: metadata comes from signed sync dbs, PKGBUILD
+diffs from the official Arch packaging repositories. Audit focus shifts to
+packaging changes and repo-side anomalies:
+
+| Signal | Severity | Why |
+|---|---|---|
+| `install script (upstream PKGBUILD install=)` gains a script or the script changed | High | Runs as root at install time; read the PKGBUILD diff around it |
+| Metadata `Depends On` gains fetchers/privilege tools (curl, wget, sudo) | Medium | Correlate with the PKGBUILD diff |
+| `Packager` changed to an unknown identity | High | Build origin changed |
+| Package arrives from a different repository than usual | Medium | Repo move; verify the `Repository` field against the distro's layout |
+| Upstream PKGBUILD diff shows any §1–§7 red flag | per §1–§7 | The same rules apply to upstream recipes |
+| Rebuild-only update (empty PKGBUILD diff, pkgrel renumbered by the distro) | Normal | Common for repo rebuilds (CachyOS); the metadata diff still applies |
+| `# NOTE: no upstream PKGBUILD` (repo-specific package) | Info | Audit the metadata; the distro's own sources are the origin |
+| sha256 missing from the sync db | Low | Unusual on healthy repos |
+| Locally-NEWER-than-repo packages are absent from the corpus | — | By design (pacman would not downgrade them) |
+
+Verdict semantics are unchanged; the higher baseline trust means SAFE
+verdicts are common and REVIEW/BLOCK require concrete evidence.
+
 ## Verdict derivation
 
 - Any Critical finding → **BLOCK**.
